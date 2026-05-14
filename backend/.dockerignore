@@ -1,0 +1,10 @@
+__pycache__
+*.pyc
+.env
+.venv
+venv/
+uploads/
+results/
+models/
+test_*.jpg
+.DS_Store

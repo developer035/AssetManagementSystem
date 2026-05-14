@@ -1,0 +1,53 @@
+version: "3.9"
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/models:/app/models
+      - ./backend/uploads:/app/uploads
+      - ./backend/results:/app/results
+    environment:
+      - MODEL_PATH=models/best.pt
+      - CONFIDENCE_THRESHOLD=0.35
+      - USE_SAHI=true
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    restart: unless-stopped
+    depends_on:
+      - redis
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:80"
+    environment:
+      - VITE_API_URL=http://localhost:8000/api
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  worker:
+    build: ./backend
+    command: celery -A app.celery_app.celery_app worker --loglevel=info
+    volumes:
+      - ./backend/models:/app/models
+      - ./backend/uploads:/app/uploads
+      - ./backend/results:/app/results
+    environment:
+      - MODEL_PATH=models/best.pt
+      - CONFIDENCE_THRESHOLD=0.35
+      - USE_SAHI=true
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      - redis
+    restart: unless-stopped

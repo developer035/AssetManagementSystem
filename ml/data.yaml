@@ -1,0 +1,14 @@
+# Spatial Asset Management — Land Cover Segmentation
+# 4-class model for Trees, Parks, Water, Roads
+# Trained on DeepGlobe Land Cover Classification Dataset
+
+path: ./data/landcover
+train: images/train
+val: images/val
+
+nc: 4
+names:
+  0: Trees & Green Cover
+  1: Parks & Open Spaces
+  2: Water Bodies
+  3: Roads & Footpaths
