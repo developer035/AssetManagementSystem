@@ -96,17 +96,19 @@ export default function ReportPanel() {
 
       <div className="section-divider mt-4 pt-3">
         <p className="panel-kicker mb-2">Included in the pack</p>
-        <div className="space-y-1.5">
+        <div className="rounded-[20px] border border-white/8 bg-white/[0.04] p-3">
+          <div className="space-y-2">
           {[
             'Asset detection summary and category confidence snapshot.',
             'Height estimation section when building candidates are available.',
             'Formatted certification block for governance or stakeholder review.',
           ].map((item) => (
-            <div key={item} className="flex items-start gap-2 text-[11px] leading-5 text-surface-300/64">
-              <span className="mt-1 h-1.5 w-1.5 rounded-full bg-brand-300" />
+            <div key={item} className="flex items-start gap-2.5 text-[12px] leading-6 text-surface-100/88">
+              <span className="mt-2 h-1.5 w-1.5 rounded-full bg-emerald-300" />
               <span>{item}</span>
             </div>
           ))}
+          </div>
         </div>
       </div>
     </div>
