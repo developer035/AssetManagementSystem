@@ -21,6 +21,41 @@ const api = axios.create({
   timeout: 120000, // 2 min for large images
 });
 
+const DETECTION_POLL_INTERVAL_MS = 1500;
+const DETECTION_POLL_TIMEOUT_MS = 180000;
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function waitForDetectionJob(jobId) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < DETECTION_POLL_TIMEOUT_MS) {
+    const response = await api.get(`/detect/${jobId}`, {
+      validateStatus: (status) => [200, 202, 500].includes(status),
+    });
+
+    if (response.status === 200 && response.data?.status !== 'queued' && response.data?.status !== 'processing') {
+      return response.data;
+    }
+
+    if (response.status === 500 || response.data?.status === 'failed') {
+      const message =
+        response.data?.error ||
+        response.data?.detail ||
+        'Detection job failed before completion.';
+      throw new Error(message);
+    }
+
+    await sleep(DETECTION_POLL_INTERVAL_MS);
+  }
+
+  throw new Error('Detection is taking longer than expected. Please try again.');
+}
+
 /**
  * Upload an image for asset detection.
  */
@@ -32,15 +67,27 @@ export async function detectAssets(file, confidence = 0.35, useSahi = true) {
 
   const response = await api.post('/detect', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    validateStatus: (status) => [200, 202].includes(status),
   });
-  return response.data;
+
+  if (response.status === 200 || response.data?.status === 'completed') {
+    return response.data;
+  }
+
+  if (!response.data?.job_id) {
+    throw new Error('Detection job was created without a job reference.');
+  }
+
+  return waitForDetectionJob(response.data.job_id);
 }
 
 /**
  * Retrieve a stored detection result.
  */
 export async function getDetectionResult(jobId) {
-  const response = await api.get(`/detect/${jobId}`);
+  const response = await api.get(`/detect/${jobId}`, {
+    validateStatus: (status) => [200, 202, 500].includes(status),
+  });
   return response.data;
 }
 

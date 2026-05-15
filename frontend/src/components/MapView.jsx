@@ -17,20 +17,35 @@ export default function MapView() {
       .filter(det => {
         if (det.confidence < confidenceThreshold) return false;
         if (!activeCats.includes(det.category)) return false;
-        if (!det.bbox_geo) return false;
+        if (!det.geo_polygon && !det.bbox_geo) return false;
         return true;
       })
       .map((det, i) => {
-        const [lon1, lat1, lon2, lat2] = det.bbox_geo;
+        const polygonCoordinates = Array.isArray(det.geo_polygon) && det.geo_polygon.length >= 4
+          ? det.geo_polygon.map(([lon, lat]) => [Number(lon), Number(lat)])
+          : null;
+        const bboxCoordinates = Array.isArray(det.bbox_geo) && det.bbox_geo.length === 4
+          ? (() => {
+              const [lon1, lat1, lon2, lat2] = det.bbox_geo;
+              return [
+                [lon1, lat1],
+                [lon2, lat1],
+                [lon2, lat2],
+                [lon1, lat2],
+                [lon1, lat1],
+              ];
+            })()
+          : null;
+        const coordinates = polygonCoordinates || bboxCoordinates;
+
+        if (!coordinates) return null;
+
         return {
           type: 'Feature',
           id: i,
           geometry: {
             type: 'Polygon',
-            coordinates: [[
-              [lon1, lat1], [lon2, lat1],
-              [lon2, lat2], [lon1, lat2], [lon1, lat1],
-            ]],
+            coordinates: [coordinates],
           },
           properties: {
             category: det.category,
@@ -39,7 +54,8 @@ export default function MapView() {
             color: det.color,
           },
         };
-      });
+      })
+      .filter(Boolean);
 
     if (features.length === 0) return null;
 

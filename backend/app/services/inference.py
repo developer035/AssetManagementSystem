@@ -2,7 +2,7 @@
 Inference service — orchestrates SAHI + YOLO inference pipeline.
 Can be extended for Celery-based async processing.
 """
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from PIL import Image
 
@@ -14,7 +14,7 @@ def run_inference(
     image: Image.Image,
     confidence: float = 0.35,
     use_sahi: bool = True,
-    geo_transform: Optional[Tuple] = None,
+    geo_transform: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Run the full inference pipeline.

@@ -13,6 +13,7 @@ class DetectionItem(BaseModel):
     confidence: float
     bbox_pixels: List[float]
     bbox_geo: Optional[List[float]] = None
+    geo_polygon: Optional[List[List[float]]] = None
     area_sqm: Optional[float] = None
     pixel_area: Optional[float] = None
     color: str
@@ -36,8 +37,13 @@ class DetectionResponse(BaseModel):
     """Full detection API response."""
 
     job_id: Optional[str] = None
+    status: Optional[str] = None
     total_detections: int
     detections: List[DetectionItem]
     summary: Dict[str, CategorySummary]
     image_size: ImageSize
     image_url: Optional[str] = None
+    source_file_name: Optional[str] = None
+    original_filename: Optional[str] = None
+    geo_metadata: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None

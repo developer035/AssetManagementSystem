@@ -2,13 +2,10 @@
 Export router — download results as GeoJSON, CSV, or Shapefile.
 """
 import json
-import os
 
-import aiofiles
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
-from app.config import settings
 from app.services.export_service import to_csv, to_geojson, to_shapefile
 
 router = APIRouter(tags=["export"])
@@ -56,7 +53,14 @@ async def export_shapefile(job_id: str):
 async def _load_result(job_id: str) -> dict:
     """Load persisted detection result."""
     from app.services.storage import storage_client
+
     result_str = await storage_client.load_result(f"{job_id}.json")
     if not result_str:
         raise HTTPException(404, "Job not found")
-    return json.loads(result_str)
+    result = json.loads(result_str)
+    status = result.get("status") or "completed"
+    if status in {"queued", "processing"}:
+        raise HTTPException(409, "Detection job is still processing.")
+    if status == "failed":
+        raise HTTPException(500, result.get("error") or "Detection job failed.")
+    return result

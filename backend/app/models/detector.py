@@ -9,14 +9,14 @@ Handles inference for aerial/satellite/drone imagery using:
   5. Pre-trained YOLO: Waste (trash-detection)
   6. HSV Color Segmentation: Water, Parks, Drains (fallback)
 """
-import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from PIL import Image
 from ultralytics import YOLO
 
 from app.models.color_segmenter import ColorSegmenter
+from app.utils.geo_utils import build_precise_geometry
 
 # ═══════════════════════════════════════════════════════════════
 #  MULTI-MODEL CONFIGURATION — All 8 Asset Categories
@@ -205,7 +205,7 @@ class AssetDetector:
         image: Image.Image,
         confidence: float = 0.35,
         use_sahi: bool = True,
-        geo_transform: Optional[Tuple] = None,
+        geo_transform: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Run detection on a PIL image using all available detectors.
@@ -240,7 +240,7 @@ class AssetDetector:
     # SAHI inference
     # ------------------------------------------------------------------
     def _run_sahi(
-        self, image: Image.Image, sahi_model, category_map: dict, geo_transform: Optional[Tuple]
+        self, image: Image.Image, sahi_model, category_map: dict, geo_transform: Optional[Dict[str, Any]]
     ) -> List[Dict]:
         from sahi.predict import get_sliced_prediction
 
@@ -267,23 +267,19 @@ class AssetDetector:
             conf = obj.score.value
             pixel_area = (bbox.maxx - bbox.minx) * (bbox.maxy - bbox.miny)
 
-            geo_bbox = None
-            geo_area_sqm = None
-            if geo_transform:
-                geo_bbox = self._pixels_to_geo(
-                    [bbox.minx, bbox.miny, bbox.maxx, bbox.maxy],
-                    image.size, geo_transform,
-                )
-                geo_area_sqm = self._estimate_area_sqm(
-                    bbox.minx, bbox.miny, bbox.maxx, bbox.maxy,
-                    image.size, geo_transform,
-                )
+            bbox_pixels = [bbox.minx, bbox.miny, bbox.maxx, bbox.maxy]
+            geo_bbox, geo_polygon, geo_area_sqm = build_precise_geometry(
+                bbox_pixels=bbox_pixels,
+                mask_polygon=None,
+                geo_reference=geo_transform,
+            )
 
             detections.append({
                 "category": category,
                 "confidence": round(conf, 3),
-                "bbox_pixels": [bbox.minx, bbox.miny, bbox.maxx, bbox.maxy],
+                "bbox_pixels": bbox_pixels,
                 "bbox_geo": geo_bbox,
+                "geo_polygon": geo_polygon,
                 "area_sqm": geo_area_sqm,
                 "pixel_area": pixel_area,
                 "color": CATEGORY_COLORS.get(category, "#FFFFFF"),
@@ -300,7 +296,7 @@ class AssetDetector:
         model,
         category_map: dict,
         confidence: float,
-        geo_transform: Optional[Tuple],
+        geo_transform: Optional[Dict[str, Any]],
     ) -> List[Dict]:
         results = model(image, conf=confidence, iou=0.45, verbose=False)
         result = results[0]
@@ -317,66 +313,29 @@ class AssetDetector:
             x1, y1, x2, y2 = [float(v) for v in box.xyxy[0]]
             pixel_area = (x2 - x1) * (y2 - y1)
 
-            geo_bbox = None
-            geo_area_sqm = None
-            if geo_transform:
-                geo_bbox = self._pixels_to_geo(
-                    [x1, y1, x2, y2], image.size, geo_transform
-                )
-                geo_area_sqm = self._estimate_area_sqm(
-                    x1, y1, x2, y2, image.size, geo_transform
-                )
-
             mask_polygon = None
             if has_masks and i < len(result.masks.xy):
                 mask_polygon = result.masks.xy[i].tolist()
 
+            bbox_pixels = [x1, y1, x2, y2]
+            geo_bbox, geo_polygon, geo_area_sqm = build_precise_geometry(
+                bbox_pixels=bbox_pixels,
+                mask_polygon=mask_polygon,
+                geo_reference=geo_transform,
+            )
+
             detections.append({
                 "category": category,
                 "confidence": round(conf, 3),
-                "bbox_pixels": [x1, y1, x2, y2],
+                "bbox_pixels": bbox_pixels,
                 "bbox_geo": geo_bbox,
+                "geo_polygon": geo_polygon,
                 "area_sqm": geo_area_sqm,
                 "pixel_area": pixel_area,
                 "color": CATEGORY_COLORS.get(category, "#FFFFFF"),
                 "mask_polygon": mask_polygon,
             })
         return detections
-
-    # ------------------------------------------------------------------
-    # Geo helpers
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _pixels_to_geo(
-        bbox_pixels: List[float],
-        image_size: Tuple[int, int],
-        geo_transform: Tuple,
-    ) -> List[float]:
-        """Convert pixel bbox to geographic lon/lat bbox."""
-        origin_lon, origin_lat, px_size_x, px_size_y = geo_transform
-        w, h = image_size
-        x1, y1, x2, y2 = bbox_pixels
-        lon1 = origin_lon + (x1 / w) * px_size_x
-        lat1 = origin_lat - (y1 / h) * abs(px_size_y)
-        lon2 = origin_lon + (x2 / w) * px_size_x
-        lat2 = origin_lat - (y2 / h) * abs(px_size_y)
-        return [lon1, lat1, lon2, lat2]
-
-    @staticmethod
-    def _estimate_area_sqm(
-        x1: float, y1: float, x2: float, y2: float,
-        image_size: Tuple[int, int],
-        geo_transform: Tuple,
-    ) -> float:
-        """Rough area estimate in square metres (equirectangular approx)."""
-        origin_lon, origin_lat, px_size_x, px_size_y = geo_transform
-        w, h = image_size
-        width_deg = ((x2 - x1) / w) * px_size_x
-        height_deg = ((y2 - y1) / h) * abs(px_size_y)
-        lat_rad = math.radians(origin_lat)
-        width_m = width_deg * 111_000 * math.cos(lat_rad)
-        height_m = height_deg * 111_000
-        return round(width_m * height_m, 2)
 
     # ------------------------------------------------------------------
     # Build structured response

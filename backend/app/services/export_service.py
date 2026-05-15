@@ -9,47 +9,50 @@ import tempfile
 import zipfile
 from typing import Any, Dict, List
 
+from app.utils.geo_utils import build_bbox_ring, close_ring
+
+
+def _detection_geometry(det: Dict[str, Any]) -> tuple[Dict[str, Any], bool]:
+    """
+    Return GeoJSON-like geometry and whether it is geographic (WGS84).
+    """
+    if det.get("geo_polygon") and len(det["geo_polygon"]) > 2:
+        return {
+            "type": "Polygon",
+            "coordinates": [close_ring(det["geo_polygon"])],
+        }, True
+
+    if det.get("bbox_geo"):
+        lon1, lat1, lon2, lat2 = det["bbox_geo"]
+        return {
+            "type": "Polygon",
+            "coordinates": [[
+                [lon1, lat1],
+                [lon2, lat1],
+                [lon2, lat2],
+                [lon1, lat2],
+                [lon1, lat1],
+            ]],
+        }, True
+
+    if det.get("mask_polygon") and len(det["mask_polygon"]) > 2:
+        return {
+            "type": "Polygon",
+            "coordinates": [close_ring(det["mask_polygon"])],
+        }, False
+
+    return {
+        "type": "Polygon",
+        "coordinates": [build_bbox_ring(det.get("bbox_pixels", [0, 0, 0, 0]))],
+    }, False
+
 
 def to_geojson(detections: List[Dict], image_size: Dict) -> str:
     """Convert detection results to GeoJSON FeatureCollection."""
+    del image_size
     features = []
     for det in detections:
-        if det.get("bbox_geo"):
-            lon1, lat1, lon2, lat2 = det["bbox_geo"]
-            geometry = {
-                "type": "Polygon",
-                "coordinates": [
-                    [
-                        [lon1, lat1],
-                        [lon2, lat1],
-                        [lon2, lat2],
-                        [lon1, lat2],
-                        [lon1, lat1],
-                    ]
-                ],
-            }
-        elif det.get("mask_polygon") and len(det["mask_polygon"]) > 2:
-            # Pixel coordinates — no geo transform available
-            coords = det["mask_polygon"]
-            # Close the polygon ring
-            if coords[0] != coords[-1]:
-                coords = coords + [coords[0]]
-            geometry = {"type": "Polygon", "coordinates": [coords]}
-        else:
-            # Fall back to pixel bounding box as geometry
-            x1, y1, x2, y2 = det.get("bbox_pixels", [0, 0, 0, 0])
-            geometry = {
-                "type": "Polygon",
-                "coordinates": [
-                    [
-                        [x1, y1],
-                        [x2, y1],
-                        [x2, y2],
-                        [x1, y2],
-                        [x1, y1],
-                    ]
-                ],
-            }
+        geometry, is_geographic = _detection_geometry(det)
 
         features.append(
             {
@@ -60,6 +63,7 @@ def to_geojson(detections: List[Dict], image_size: Dict) -> str:
                     "confidence": det["confidence"],
                     "area_sqm": det.get("area_sqm"),
                     "color": det.get("color"),
+                    "geometry_space": "wgs84" if is_geographic else "pixel",
                 },
             }
         )
@@ -85,6 +89,7 @@ def to_csv(detections: List[Dict]) -> str:
         "geo_lat2",
         "area_sqm",
         "color",
+        "has_geo_polygon",
     ]
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
@@ -106,6 +111,7 @@ def to_csv(detections: List[Dict]) -> str:
                 "geo_lat2": geo[3],
                 "area_sqm": det.get("area_sqm"),
                 "color": det.get("color"),
+                "has_geo_polygon": bool(det.get("geo_polygon")),
             }
         )
     return output.getvalue()
@@ -131,41 +137,35 @@ def to_shapefile(detections: List[Dict], image_size: Dict) -> bytes:
         w.field("confidence", "N", decimal=3)
         w.field("area_sqm", "N", decimal=2)
         w.field("color", "C", size=10)
+        w.field("space", "C", size=12)
+
+        has_geographic_geometry = False
 
         for det in detections:
-            if det.get("bbox_geo"):
-                lon1, lat1, lon2, lat2 = det["bbox_geo"]
-            else:
-                # Use pixel coords as fallback
-                x1, y1, x2, y2 = det.get("bbox_pixels", [0, 0, 0, 0])
-                lon1, lat1, lon2, lat2 = x1, y1, x2, y2
+            geometry, is_geographic = _detection_geometry(det)
+            has_geographic_geometry = has_geographic_geometry or is_geographic
+            ring = geometry["coordinates"][0]
 
-            # Write polygon
-            w.poly([[
-                [lon1, lat1],
-                [lon2, lat1],
-                [lon2, lat2],
-                [lon1, lat2],
-                [lon1, lat1],
-            ]])
+            w.poly([ring])
 
             w.record(
                 category=det["category"],
                 confidence=det["confidence"],
                 area_sqm=det.get("area_sqm") or 0,
                 color=det.get("color", ""),
-            )
-
-        # Write .prj file (WGS84)
-        prj_path = shp_path + ".prj"
-        with open(prj_path, "w") as prj:
-            prj.write(
-                'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",'
-                'SPHEROID["WGS_1984",6378137,298.257223563]],'
-                'PRIMEM["Greenwich",0],UNIT["Degree",0.017453292519943295]]'
+                space="wgs84" if is_geographic else "pixel",
             )
 
         w.close()
+
+        if has_geographic_geometry:
+            prj_path = shp_path + ".prj"
+            with open(prj_path, "w") as prj:
+                prj.write(
+                    'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",'
+                    'SPHEROID["WGS_1984",6378137,298.257223563]],'
+                    'PRIMEM["Greenwich",0],UNIT["Degree",0.017453292519943295]]'
+                )
 
         # Zip all shapefile components
         zip_buffer = io.BytesIO()

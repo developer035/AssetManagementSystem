@@ -9,11 +9,13 @@ by the DeepGlobe Land Cover Classification benchmark.
 Each category is detected by filtering the image in HSV color space,
 finding contours, and converting them to normalized polygon coordinates.
 """
+from typing import Any, Dict, List, Optional
+
 import cv2
 import numpy as np
-from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image
-import math
+
+from app.utils.geo_utils import build_precise_geometry
 
 
 # HSV ranges tuned for satellite/aerial imagery
@@ -76,7 +78,7 @@ class ColorSegmenter:
         self,
         image: Image.Image,
         categories: Optional[List[str]] = None,
-        geo_transform: Optional[Tuple] = None,
+        geo_transform: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Run color-based segmentation on a PIL image.
@@ -145,11 +147,11 @@ class ColorSegmenter:
                 mask_polygon = points.tolist()
 
                 # Geo conversion
-                geo_bbox = None
-                geo_area_sqm = None
-                if geo_transform:
-                    geo_bbox = self._pixels_to_geo([x1, y1, x2, y2], (w, h), geo_transform)
-                    geo_area_sqm = self._estimate_area_sqm(x1, y1, x2, y2, (w, h), geo_transform)
+                geo_bbox, geo_polygon, geo_area_sqm = build_precise_geometry(
+                    bbox_pixels=[x1, y1, x2, y2],
+                    mask_polygon=mask_polygon,
+                    geo_reference=geo_transform,
+                )
 
                 # Confidence based on color purity of the region
                 roi_mask = np.zeros((h, w), dtype=np.uint8)
@@ -164,6 +166,7 @@ class ColorSegmenter:
                     "confidence": confidence,
                     "bbox_pixels": [x1, y1, x2, y2],
                     "bbox_geo": geo_bbox,
+                    "geo_polygon": geo_polygon,
                     "area_sqm": geo_area_sqm,
                     "pixel_area": pixel_area,
                     "color": profile["color"],
@@ -171,33 +174,3 @@ class ColorSegmenter:
                 })
 
         return all_detections
-
-    @staticmethod
-    def _pixels_to_geo(
-        bbox_pixels: List[float],
-        image_size: Tuple[int, int],
-        geo_transform: Tuple,
-    ) -> List[float]:
-        origin_lon, origin_lat, px_size_x, px_size_y = geo_transform
-        w, h = image_size
-        x1, y1, x2, y2 = bbox_pixels
-        lon1 = origin_lon + (x1 / w) * px_size_x
-        lat1 = origin_lat - (y1 / h) * abs(px_size_y)
-        lon2 = origin_lon + (x2 / w) * px_size_x
-        lat2 = origin_lat - (y2 / h) * abs(px_size_y)
-        return [lon1, lat1, lon2, lat2]
-
-    @staticmethod
-    def _estimate_area_sqm(
-        x1: float, y1: float, x2: float, y2: float,
-        image_size: Tuple[int, int],
-        geo_transform: Tuple,
-    ) -> float:
-        origin_lon, origin_lat, px_size_x, px_size_y = geo_transform
-        w, h = image_size
-        width_deg = ((x2 - x1) / w) * px_size_x
-        height_deg = ((y2 - y1) / h) * abs(px_size_y)
-        lat_rad = math.radians(origin_lat)
-        width_m = width_deg * 111_000 * math.cos(lat_rad)
-        height_m = height_deg * 111_000
-        return round(width_m * height_m, 2)

@@ -157,7 +157,10 @@ export default function App() {
   } = useDetectionStore();
 
   const hasGeoData = Boolean(
-    detectionResult?.detections?.some((det) => Array.isArray(det.bbox_geo) && det.bbox_geo.length === 4)
+    detectionResult?.detections?.some((det) => (
+      (Array.isArray(det.geo_polygon) && det.geo_polygon.length >= 4)
+      || (Array.isArray(det.bbox_geo) && det.bbox_geo.length === 4)
+    ))
   );
 
   const activeCategories = useMemo(() => {

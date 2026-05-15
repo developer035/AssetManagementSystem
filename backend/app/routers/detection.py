@@ -10,7 +10,7 @@ from binascii import Error as BinasciiError
 from functools import partial
 
 import aiofiles
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from PIL import Image, UnidentifiedImageError
@@ -56,6 +56,113 @@ def _get_request_detector(request: Request):
         detector = AssetDetector(model_path=settings.MODEL_PATH)
         request.app.state.detector = detector
     return detector
+
+
+def _build_detection_job_payload(
+    *,
+    job_id: str,
+    safe_filename: str,
+    original_filename: str | None,
+    geo_transform,
+    status: str,
+    error: str | None = None,
+) -> dict:
+    from app.services.storage import storage_client
+
+    payload = {
+        "job_id": job_id,
+        "status": status,
+        "total_detections": 0,
+        "detections": [],
+        "summary": {},
+        "image_size": {"width": 0, "height": 0},
+        "image_url": storage_client.get_upload_url(safe_filename),
+        "source_file_name": safe_filename,
+        "original_filename": original_filename or safe_filename,
+        "geo_metadata": geo_transform,
+    }
+    if error:
+        payload["error"] = error
+    return payload
+
+
+def _resolve_detection_status(result: dict) -> str:
+    return result.get("status") or "completed"
+
+
+async def _load_detection_result(job_id: str) -> dict:
+    from app.services.storage import storage_client
+
+    result = json.loads(await storage_client.load_result(f"{job_id}.json"))
+    result.setdefault("job_id", job_id)
+    result.setdefault("status", _resolve_detection_status(result))
+    return result
+
+
+async def _load_completed_detection_result(job_id: str) -> dict:
+    result = await _load_detection_result(job_id)
+    status = _resolve_detection_status(result)
+
+    if status in {"queued", "processing"}:
+        raise HTTPException(409, "Detection job is still processing.")
+    if status == "failed":
+        raise HTTPException(500, result.get("error") or "Detection job failed.")
+    return result
+
+
+def _submit_detection_job(
+    background_tasks: BackgroundTasks,
+    *,
+    detector,
+    job_id: str,
+    safe_filename: str,
+    original_filename: str | None,
+    confidence: float,
+    use_sahi: bool,
+    geo_transform,
+):
+    from app.celery_app import celery_app
+    from app.tasks import detect_image_task, run_detection_job
+
+    task_kwargs = {
+        "job_id": job_id,
+        "file_name": safe_filename,
+        "original_filename": original_filename,
+        "confidence": confidence,
+        "use_sahi": use_sahi,
+        "geo_transform": geo_transform,
+    }
+
+    try:
+        inspector = celery_app.control.inspect(timeout=1)
+        active_workers = inspector.ping() or {}
+        if not active_workers:
+            raise RuntimeError("No active Celery workers available.")
+        detect_image_task.apply_async(kwargs=task_kwargs, task_id=job_id)
+    except Exception as exc:
+        print(f"⚠️  Celery submission failed; falling back to in-process background task. Reason: {exc}")
+        background_tasks.add_task(run_detection_job, detector=detector, **task_kwargs)
+
+
+def _derive_height_gsd(geo_metadata: dict | None) -> float:
+    if not geo_metadata:
+        return 0.3
+
+    try:
+        gsd = float(geo_metadata.get("approx_gsd_m") or 0.3)
+        return gsd if gsd > 0 else 0.3
+    except (TypeError, ValueError):
+        return 0.3
+
+
+def _extract_source_filename(det_result: dict) -> str | None:
+    if det_result.get("source_file_name"):
+        return det_result["source_file_name"]
+
+    image_url = det_result.get("image_url")
+    if not image_url:
+        return None
+    return os.path.basename(image_url)
 
 
 def _process_video_job(
@@ -147,36 +254,10 @@ def _process_video_job(
     }
 
 
-async def _run_detection_sync(
-    request: Request,
-    *,
-    job_id: str,
-    safe_filename: str,
-    contents: bytes,
-    confidence: float,
-    use_sahi: bool,
-    geo_transform,
-) -> dict:
-    from app.services.storage import storage_client
-
-    image = _load_rgb_image(contents)
-    detector = _get_request_detector(request)
-    result = await run_in_threadpool(
-        detector.detect,
-        image,
-        confidence,
-        use_sahi,
-        geo_transform,
-    )
-    result["job_id"] = job_id
-    result["image_url"] = storage_client.get_upload_url(safe_filename)
-    await storage_client.save_result(f"{job_id}.json", json.dumps(result))
-    return result
-
-
 @router.post("/detect")
 async def detect_assets(
     request: Request,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     confidence: float = Form(default=settings.CONFIDENCE_THRESHOLD, ge=0.0, le=1.0),
     use_sahi: bool = Form(default=settings.USE_SAHI),
@@ -205,27 +286,38 @@ async def detect_assets(
     geo_transform = extract_geo_transform(local_path)
     storage_client.cleanup_local_path(local_path)
 
-    # The frontend expects an immediate JSON response, so we run detection
-    # directly against the already-loaded API model instead of blocking on Celery.
-    result = await _run_detection_sync(
-        request,
+    queued_payload = _build_detection_job_payload(
         job_id=job_id,
         safe_filename=safe_filename,
-        contents=contents,
+        original_filename=file.filename,
+        geo_transform=geo_transform,
+        status="queued",
+    )
+    await storage_client.save_result(f"{job_id}.json", json.dumps(queued_payload))
+
+    _submit_detection_job(
+        background_tasks,
+        detector=_get_request_detector(request),
+        job_id=job_id,
+        safe_filename=safe_filename,
+        original_filename=file.filename,
         confidence=confidence,
         use_sahi=use_sahi,
         geo_transform=geo_transform,
     )
-    return JSONResponse(result)
+    return JSONResponse(queued_payload, status_code=202)
 
 
 @router.get("/detect/{job_id}")
 async def get_detection_result(job_id: str):
     """Retrieve a stored detection result by job ID."""
-    from app.services.storage import storage_client
+    result = await _load_detection_result(job_id)
+    status = _resolve_detection_status(result)
 
-    result = json.loads(await storage_client.load_result(f"{job_id}.json"))
-    result["job_id"] = job_id
+    if status in {"queued", "processing"}:
+        return JSONResponse(result, status_code=202)
+    if status == "failed":
+        return JSONResponse(result, status_code=500)
     return JSONResponse(result)
 
 
@@ -347,12 +439,7 @@ async def digit_push_assets(
     """
     from app.services.digit_integration import push_to_digit
 
-    from app.services.storage import storage_client
-    
-    result_str = await storage_client.load_result(f"{job_id}.json")
-    if not result_str:
-        raise HTTPException(404, "Job not found.")
-    det_result = json.loads(result_str)
+    det_result = await _load_completed_detection_result(job_id)
 
     response = push_to_digit(
         detections=det_result["detections"],
@@ -464,26 +551,28 @@ async def generate_report(
     from app.services.report_generator import generate_audit_report
     from app.services.height_estimation import estimate_heights
 
-    # Load detection result
     from app.services.storage import storage_client
-    
-    result_str = await storage_client.load_result(f"{job_id}.json")
-    if not result_str:
-        raise HTTPException(404, "Job not found.")
-    det_result = json.loads(result_str)
 
-    # Try to get height estimates
+    det_result = await _load_completed_detection_result(job_id)
+
     height_estimates = None
-    # Use storage_client to get the uploaded image for height estimation
-    try:
-        # Assuming the original image ends with _image.jpg or we just download what matches job_id
-        # In this simplistic S3 flow, we can try downloading the file from S3 if it exists
-        # We need the original image, but we didn't save the extension securely.
-        # This is a best effort.
-        # Just skip height estimation gracefully if we can't fetch it
-        pass
-    except Exception:
-        pass
+    source_file_name = _extract_source_filename(det_result)
+    if source_file_name:
+        local_path = None
+        try:
+            local_path = await storage_client.get_local_path(source_file_name)
+            image = await run_in_threadpool(lambda: Image.open(local_path).convert("RGB"))
+            height_estimates = await run_in_threadpool(
+                estimate_heights,
+                image=image,
+                detections=det_result.get("detections", []),
+                gsd=_derive_height_gsd(det_result.get("geo_metadata")),
+            )
+        except Exception:
+            height_estimates = None
+        finally:
+            if local_path:
+                storage_client.cleanup_local_path(local_path)
 
     pdf_bytes = await run_in_threadpool(
         generate_audit_report,
